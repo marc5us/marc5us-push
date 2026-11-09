@@ -1,14 +1,21 @@
 name: marc5us push
 on:
-  schedule:
-    - cron: '*/5 * * * *'
   workflow_dispatch:
+  schedule:
+    - cron: '0 */6 * * *'   # Sicherheitsnetz, falls die Kette abreißt
+
 concurrency:
   group: push
   cancel-in-progress: false
+
+permissions:
+  actions: write
+  contents: read
+
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 345
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -16,8 +23,14 @@ jobs:
           node-version: 20
       - run: npm install --omit=dev
         working-directory: server
-      - run: node poll.js
+      - name: Push-Dienst (startet sich selbst neu)
         working-directory: server
         env:
           SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
           SERVICE_ACCOUNT_MASSAGEN: ${{ secrets.SERVICE_ACCOUNT_MASSAGEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # Nach 340 Min. den nächsten Lauf anstoßen; er wartet, bis dieser endet
+          (sleep 20400 && gh workflow run push.yml --ref main) &
+          until node poll.js; do echo "Neustart nach Fehler"; sleep 10; done
