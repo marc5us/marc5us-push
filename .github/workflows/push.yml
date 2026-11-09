@@ -1,4 +1,5 @@
 name: marc5us push
+
 on:
   workflow_dispatch:
   schedule:
@@ -18,11 +19,15 @@ jobs:
     timeout-minutes: 345
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: npm install --omit=dev
+
+      - name: Abhängigkeiten installieren
         working-directory: server
+        run: npm install --omit=dev
+
       - name: Push-Dienst (startet sich selbst neu)
         working-directory: server
         env:
@@ -31,6 +36,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         run: |
-          # Nach 340 Min. den nächsten Lauf anstoßen; er wartet, bis dieser endet
+          # Nach ca. 340 Minuten den nächsten Lauf anstoßen. Er wartet in der
+          # Warteschlange (concurrency), bis dieser Lauf beendet ist.
           (sleep 20400 && gh workflow run push.yml --ref main) &
-          until node poll.js; do echo "Neustart nach Fehler"; sleep 10; done
+          until node poll.js; do
+            echo "Neustart nach Fehler"
+            sleep 10
+          done
