@@ -20,3 +20,4 @@ jobs:
         working-directory: server
         env:
           SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
+          SERVICE_ACCOUNT_MASSAGEN: ${{ secrets.SERVICE_ACCOUNT_MASSAGEN }}
