@@ -29,7 +29,7 @@ async function send(uid, title, body) {
   try {
     const snap = await db.ref('pushTokens/' + uid).get();
     const tokens = Object.keys(snap.val() || {});
-    if (!tokens.length) return;
+    if (!tokens.length) { console.log('Keine Push-Tokens für', uid); return; }
     const res = await fmsg.sendEachForMulticast({ tokens, notification: { title, body },
       webpush: { notification: { icon: '/icons/icon-192.png', badge: '/icons/icon-192.png' }, fcmOptions: { link: '/' } } });
     await Promise.all(res.responses.map((r, i) => (!r.success && DEAD.test(r.error?.code || ''))
@@ -46,6 +46,7 @@ async function runFis() {
   const old = stateSnap.val(), first = !old;
   const oldTrips = (old && old.trips) || {}, oldReq = (old && old.requests) || {};
   const st = { trips: {}, requests: {} }, jobs = [];
+  console.log('fis Lauf: Kunden', Object.keys(clients).length, 'erster Lauf:', first);
 
   // Fahrten
   for (const [uid, c] of Object.entries(clients)) {
@@ -88,7 +89,7 @@ async function runFis() {
   // Stand zuerst speichern, damit ein Abbruch beim Versand nicht zu Wiederholungen führt
   await db.ref('serverState').set(st);
   await Promise.all(jobs);
-  if (jobs.length) console.log(`marc5us-75fcb: geprüft, ${jobs.length} Aktionen`);
+  console.log('fis geprüft, Aktionen:', jobs.length, 'Stand:', JSON.stringify(st.trips).slice(0, 300));
 }
 
 // =====================================================================
