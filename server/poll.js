@@ -1,5 +1,4 @@
-// marc5us Push-Dienst: läuft dauerhaft (z. B. Render Background Worker)
-// und reagiert sofort auf Änderungen in der Datenbank.
+// marc5us Push-Dienst
 // Bedient zwei Firebase-Projekte:
 //   marc5us-75fcb    -> Secret SERVICE_ACCOUNT_JSON
 //   marc5us-massagen -> Secret SERVICE_ACCOUNT_MASSAGEN
@@ -18,7 +17,7 @@ const massagen = admin.initializeApp({
 const DEAD = /registration-token-not-registered|invalid-registration-token/;
 
 // =====================================================================
-// PROJEKT marc5us-75fcb (unverändert)
+// PROJEKT marc5us-75fcb
 // =====================================================================
 const db = fis.database();
 const fmsg = fis.messaging();
@@ -85,8 +84,9 @@ async function runFis() {
     }
   }
 
-  await Promise.all(jobs);
+  // Stand zuerst speichern, damit ein Abbruch beim Versand nicht zu Wiederholungen führt
   await db.ref('serverState').set(st);
+  await Promise.all(jobs);
   console.log(first ? 'marc5us-75fcb: Erster Lauf, Stand gespeichert.' : `marc5us-75fcb: geprüft, ${jobs.length} Aktionen.`);
 }
 
@@ -99,17 +99,22 @@ const M_ADMIN_UIDS = ['yhucvoa4VRYdoMdwrYl4k0AnrfG2', 'hik785QiB1YDSG4YvcwNHvGK7
 
 const toList = v => (Array.isArray(v) ? v : Object.values(v || {}));
 
-// "2026-11-10T14:00" (deutsche Ortszeit) in einen echten Zeitpunkt umrechnen
+// "2026-11-10T14:00" (deutsche Ortszeit) in einen echten Zeitpunkt umrechnen.
+// Gibt null zurück, wenn das Datum ungültig ist – statt den ganzen Lauf abzubrechen.
 function parseBerlin(s) {
-  const guess = new Date(String(s).slice(0, 16) + ':00Z');
-  const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'Europe/Berlin', hourCycle: 'h23',
-    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).formatToParts(guess);
-  const g = Object.fromEntries(parts.map(p => [p.type, p.value]));
-  const asBerlin = Date.UTC(+g.year, +g.month - 1, +g.day, +g.hour, +g.minute);
-  return new Date(guess.getTime() - (asBerlin - guess.getTime()));
+  try {
+    const guess = new Date(String(s).slice(0, 16) + ':00Z');
+    if (isNaN(guess)) return null;
+    const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'Europe/Berlin', hourCycle: 'h23',
+      year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).formatToParts(guess);
+    const g = Object.fromEntries(parts.map(p => [p.type, p.value]));
+    const asBerlin = Date.UTC(+g.year, +g.month - 1, +g.day, +g.hour, +g.minute);
+    return new Date(guess.getTime() - (asBerlin - guess.getTime()));
+  } catch (e) { return null; }
 }
 function fmtBerlin(s) {
-  return parseBerlin(s).toLocaleString('de-DE', { timeZone: 'Europe/Berlin', weekday: 'short', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+  const d = parseBerlin(s);
+  return d ? d.toLocaleString('de-DE', { timeZone: 'Europe/Berlin', weekday: 'short', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : String(s);
 }
 
 // Data-only-Nachricht, die der Service Worker (firebase-messaging-sw.js) anzeigt
@@ -145,7 +150,7 @@ async function runMassagen() {
   for (const m of Object.values(messages)) {
     if (!m || !m.timestamp) continue;
     if (m.timestamp > maxTs) maxTs = m.timestamp;
-    if (first || m.timestamp <= old.lastMsg) continue;
+    if (first || m.timestamp <= ((old && old.lastMsg) || '')) continue;
     const body = String(m.text || '').slice(0, 120);
     if (m.sender === 'admin' && m.clientKey) {
       (uidsByClient[m.clientKey] || []).forEach(u => jobs.push(mSend(u, 'Neue Nachricht von Marc', body)));
@@ -185,7 +190,9 @@ async function runMassagen() {
   for (const [key, c] of Object.entries(clients)) {
     for (const a of toList(c.appointments)) {
       if (!a || a.status !== 'aktiv' || !a.depTime) continue;
-      const diff = parseBerlin(a.depTime).getTime() - now;
+      const pb = parseBerlin(a.depTime);
+      if (!pb) continue;
+      const diff = pb.getTime() - now;
       if (diff > 25 * 3600e3 || diff < 23 * 3600e3) continue;
       const flag = mdb.ref('reminders/' + key + '/' + a.depTime.replace(/\D/g, ''));
       if ((await flag.get()).exists()) continue;
@@ -201,18 +208,18 @@ async function runMassagen() {
     jobs.push(mdb.ref('push_requests/' + id).remove());
   }
 
-  await Promise.all(jobs);
+  // Stand zuerst speichern, damit ein Abbruch beim Versand nicht zu Wiederholungen führt
   await mdb.ref('pushState').set(state);
+  await Promise.all(jobs);
   console.log(first ? 'marc5us-massagen: Erster Lauf, Stand gespeichert.' : `marc5us-massagen: geprüft, ${jobs.length} Aktionen.`);
 }
 
 // =====================================================================
-// =====================================================================
-// DAUERBETRIEB: reagiert sofort auf Änderungen statt alle 5 Minuten zu prüfen
+// DAUERBETRIEB: reagiert sofort auf Änderungen
 // =====================================================================
 process.on('unhandledRejection', e => console.error('Unbehandelt:', e));
 
-// Verhindert, dass dieselbe Prüfung parallel läuft; mehrere schnelle Änderungen werden gebündelt
+// Bündelt schnelle Änderungen und verhindert parallele Prüfungen
 const busy = {}, again = {}, timers = {};
 function schedule(name, fn) {
   clearTimeout(timers[name]);
