@@ -3,6 +3,7 @@
 //   marc5us-75fcb    -> Secret SERVICE_ACCOUNT_JSON
 //   marc5us-massagen -> Secret SERVICE_ACCOUNT_MASSAGEN
 const admin = require('firebase-admin');
+const crypto = require('crypto');
 
 const fis = admin.initializeApp({
   credential: admin.credential.cert(JSON.parse(process.env.SERVICE_ACCOUNT_JSON)),
@@ -87,7 +88,7 @@ async function runFis() {
   // Stand zuerst speichern, damit ein Abbruch beim Versand nicht zu Wiederholungen führt
   await db.ref('serverState').set(st);
   await Promise.all(jobs);
-  console.log(first ? 'marc5us-75fcb: Erster Lauf, Stand gespeichert.' : `marc5us-75fcb: geprüft, ${jobs.length} Aktionen.`);
+  if (jobs.length) console.log(`marc5us-75fcb: geprüft, ${jobs.length} Aktionen`);
 }
 
 // =====================================================================
@@ -100,7 +101,7 @@ const M_ADMIN_UIDS = ['yhucvoa4VRYdoMdwrYl4k0AnrfG2', 'hik785QiB1YDSG4YvcwNHvGK7
 const toList = v => (Array.isArray(v) ? v : Object.values(v || {}));
 
 // "2026-11-10T14:00" (deutsche Ortszeit) in einen echten Zeitpunkt umrechnen.
-// Gibt null zurück, wenn das Datum ungültig ist – statt den ganzen Lauf abzubrechen.
+// Gibt null zurück, wenn das Datum ungültig ist.
 function parseBerlin(s) {
   try {
     const guess = new Date(String(s).slice(0, 16) + ':00Z');
@@ -117,17 +118,19 @@ function fmtBerlin(s) {
   return d ? d.toLocaleString('de-DE', { timeZone: 'Europe/Berlin', weekday: 'short', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : String(s);
 }
 
-// Data-only-Nachricht, die der Service Worker (firebase-messaging-sw.js) anzeigt
-const crypto = require('crypto');
+// Markiert einen Schlüssel einmalig. Gibt false zurück, wenn er schon verarbeitet wurde.
+async function claimOnce(key) {
+  const r = await mdb.ref('pushSent/' + key).transaction(cur => cur ? undefined : { ts: Date.now() });
+  return r.committed;
+}
 
-// Verhindert doppelte Pushes: jeder Inhalt wird pro Empfänger nur einmal gesendet
+// Data-only-Nachricht, die der Service Worker (firebase-messaging-sw.js) anzeigt.
+// once = true: identischer Inhalt an denselben Empfänger wird nur einmal gesendet.
 async function mSend(uid, title, body, url = '/', once = true) {
   try {
     if (once) {
       const key = crypto.createHash('sha1').update(uid + '|' + title + '|' + body).digest('hex');
-      const ref = mdb.ref('pushSent/' + key);
-      const r = await ref.transaction(cur => cur ? undefined : { ts: Date.now() });
-      if (!r.committed) return;
+      if (!(await claimOnce('c_' + key))) return;
     }
     const snap = await mdb.ref('push_tokens/' + uid).get();
     const entries = Object.entries(snap.val() || {}).filter(([, v]) => v && v.token);
@@ -154,20 +157,21 @@ async function runMassagen() {
   const state = { lastMsg: '', appts: {} };
   const jobs = [];
 
-  // 1) Neue Nachrichten (Admin -> Kunde, Kunde -> Admin)
-  let maxTs = (old && old.lastMsg) || '';
-  for (const m of Object.values(messages)) {
+  // 1) Neue Nachrichten: jede Nachricht genau einmal, Schlüssel = Datenbank-ID.
+  //    Alte Nachrichten (älter als 15 Min.) und der erste Lauf werden nur markiert.
+  for (const [id, m] of Object.entries(messages)) {
     if (!m || !m.timestamp) continue;
-    if (m.timestamp > maxTs) maxTs = m.timestamp;
-    if (first || m.timestamp <= ((old && old.lastMsg) || '')) continue;
+    const ts = new Date(m.timestamp).getTime();
+    const fresh = !first && !isNaN(ts) && ts > Date.now() - 15 * 60e3;
+    if (!(await claimOnce('msg_' + id))) continue;
+    if (!fresh) continue;
     const body = String(m.text || '').slice(0, 120);
     if (m.sender === 'admin' && m.clientKey) {
-      (uidsByClient[m.clientKey] || []).forEach(u => jobs.push(mSend(u, 'Neue Nachricht von Marc', body)));
+      (uidsByClient[m.clientKey] || []).forEach(u => jobs.push(mSend(u, 'Neue Nachricht von Marc', body, '/', false)));
     } else if (m.sender === 'client') {
-      M_ADMIN_UIDS.forEach(u => jobs.push(mSend(u, 'Neue Nachricht von ' + (m.clientName || m.username || 'Kunde'), body)));
+      M_ADMIN_UIDS.forEach(u => jobs.push(mSend(u, 'Neue Nachricht von ' + (m.clientName || m.username || 'Kunde'), body, '/', false)));
     }
   }
-  state.lastMsg = maxTs;
 
   // 2) Termine: neu, bestätigt, storniert, geändert
   const now = Date.now();
@@ -211,20 +215,20 @@ async function runMassagen() {
     }
   }
 
-  // 4) Test-Pushes aus Kundenmenü und Adminbereich
+  // 4) Test-Pushes aus Kundenmenü und Adminbereich (immer senden)
   for (const [id, r] of Object.entries(reqSnap.val() || {})) {
-        if (r && r.toUid) jobs.push(mSend(r.toUid, r.title || 'marc5us Massagen', r.body || 'Test erfolgreich.', '/', false));
+    if (r && r.toUid) jobs.push(mSend(r.toUid, r.title || 'marc5us Massagen', r.body || 'Test erfolgreich.', '/', false));
     jobs.push(mdb.ref('push_requests/' + id).remove());
   }
 
   // Stand zuerst speichern, damit ein Abbruch beim Versand nicht zu Wiederholungen führt
   await mdb.ref('pushState').set(state);
   await Promise.all(jobs);
-  console.log(first ? 'marc5us-massagen: Erster Lauf, Stand gespeichert.' : `marc5us-massagen: geprüft, ${jobs.length} Aktionen.`);
+  if (jobs.length) console.log(`marc5us-massagen: geprüft, ${jobs.length} Aktionen`);
 }
 
 // =====================================================================
-// DAUERBETRIEB: reagiert sofort auf Änderungen
+// DAUERBETRIEB: reagiert sofort auf Änderungen, plus Sicherheitsnetz
 // =====================================================================
 process.on('unhandledRejection', e => console.error('Unbehandelt:', e));
 
@@ -257,7 +261,9 @@ listen(mdb.ref('client_messages'), 'massagen', runMassagen);
 listen(mdb.ref('massage_clients'), 'massagen', runMassagen);
 listen(mdb.ref('client_uids'), 'massagen', runMassagen);
 listen(mdb.ref('push_requests'), 'massagen', runMassagen);
-// Terminerinnerungen brauchen eine zeitgesteuerte Prüfung, einmal pro Minute
+
+// Sicherheitsnetz: Terminerinnerungen jede Minute, Fahrten alle 30 Sekunden
 setInterval(() => schedule('massagen', runMassagen), 60 * 1000);
+setInterval(() => schedule('fis', runFis), 30 * 1000);
 
 console.log('marc5us Push-Dienst gestartet, wartet auf Änderungen.');
