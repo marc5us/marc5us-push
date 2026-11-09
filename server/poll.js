@@ -32,6 +32,7 @@ async function send(uid, title, body) {
     if (!tokens.length) { console.log('Keine Push-Tokens für', uid); return; }
     const res = await fmsg.sendEachForMulticast({ tokens, notification: { title, body },
       webpush: { notification: { icon: '/icons/icon-192.png', badge: '/icons/icon-192.png' }, fcmOptions: { link: '/' } } });
+    console.log('Push an', uid, 'ok:', res.successCount, 'Fehler:', res.failureCount, res.responses.filter(r => !r.success).map(r => r.error?.code).join(',') || '-');
     await Promise.all(res.responses.map((r, i) => (!r.success && DEAD.test(r.error?.code || ''))
       ? db.ref(`pushTokens/${uid}/${tokens[i]}`).remove() : null));
   } catch (e) { console.error('Push-Fehler', uid, e.message); }
@@ -141,6 +142,7 @@ async function mSend(uid, title, body, url = '/', once = true) {
       data: { title, body, url, tag: 'marc5us' },
       webpush: { headers: { Urgency: 'high' }, fcmOptions: { link: url } }
     });
+    console.log('Massagen-Push an', uid, 'ok:', res.successCount, 'Fehler:', res.failureCount, res.responses.filter(r => !r.success).map(r => r.error?.code).join(',') || '-');
     await Promise.all(res.responses.map((r, i) => (!r.success && DEAD.test(r.error?.code || ''))
       ? mdb.ref(`push_tokens/${uid}/${entries[i][0]}`).remove() : null));
   } catch (e) { console.error('Massagen Push-Fehler', uid, e.message); }
