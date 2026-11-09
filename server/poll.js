@@ -118,8 +118,17 @@ function fmtBerlin(s) {
 }
 
 // Data-only-Nachricht, die der Service Worker (firebase-messaging-sw.js) anzeigt
-async function mSend(uid, title, body, url = '/') {
+const crypto = require('crypto');
+
+// Verhindert doppelte Pushes: jeder Inhalt wird pro Empfänger nur einmal gesendet
+async function mSend(uid, title, body, url = '/', once = true) {
   try {
+    if (once) {
+      const key = crypto.createHash('sha1').update(uid + '|' + title + '|' + body).digest('hex');
+      const ref = mdb.ref('pushSent/' + key);
+      const r = await ref.transaction(cur => cur ? undefined : { ts: Date.now() });
+      if (!r.committed) return;
+    }
     const snap = await mdb.ref('push_tokens/' + uid).get();
     const entries = Object.entries(snap.val() || {}).filter(([, v]) => v && v.token);
     if (!entries.length) return;
@@ -204,7 +213,7 @@ async function runMassagen() {
 
   // 4) Test-Pushes aus Kundenmenü und Adminbereich
   for (const [id, r] of Object.entries(reqSnap.val() || {})) {
-    if (r && r.toUid) jobs.push(mSend(r.toUid, r.title || 'marc5us Massagen', r.body || 'Test erfolgreich.'));
+        if (r && r.toUid) jobs.push(mSend(r.toUid, r.title || 'marc5us Massagen', r.body || 'Test erfolgreich.', '/', false));
     jobs.push(mdb.ref('push_requests/' + id).remove());
   }
 
