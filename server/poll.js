@@ -1,4 +1,5 @@
-// marc5us Push-Abfrage: läuft alle 5 Minuten über GitHub Actions.
+// marc5us Push-Dienst: läuft dauerhaft (z. B. Render Background Worker)
+// und reagiert sofort auf Änderungen in der Datenbank.
 // Bedient zwei Firebase-Projekte:
 //   marc5us-75fcb    -> Secret SERVICE_ACCOUNT_JSON
 //   marc5us-massagen -> Secret SERVICE_ACCOUNT_MASSAGEN
@@ -206,10 +207,41 @@ async function runMassagen() {
 }
 
 // =====================================================================
-async function main() {
-  let code = 0;
-  try { await runFis(); } catch (e) { console.error('marc5us-75fcb Fehler:', e); code = 1; }
-  try { await runMassagen(); } catch (e) { console.error('marc5us-massagen Fehler:', e); code = 1; }
-  process.exit(code);
+// =====================================================================
+// DAUERBETRIEB: reagiert sofort auf Änderungen statt alle 5 Minuten zu prüfen
+// =====================================================================
+process.on('unhandledRejection', e => console.error('Unbehandelt:', e));
+
+// Verhindert, dass dieselbe Prüfung parallel läuft; mehrere schnelle Änderungen werden gebündelt
+const busy = {}, again = {}, timers = {};
+function schedule(name, fn) {
+  clearTimeout(timers[name]);
+  timers[name] = setTimeout(async () => {
+    if (busy[name]) { again[name] = true; return; }
+    busy[name] = true;
+    do {
+      again[name] = false;
+      try { await fn(); } catch (e) { console.error(name, 'Fehler:', e.message); }
+    } while (again[name]);
+    busy[name] = false;
+  }, 300);
 }
-main();
+
+function listen(ref, name, fn) {
+  ref.on('value', () => schedule(name, fn), e => console.error(name, 'Listener:', e.message));
+}
+
+// marc5us-75fcb
+listen(db.ref('clients'), 'fis', runFis);
+listen(db.ref('requests'), 'fis', runFis);
+listen(db.ref('pushTests'), 'fis', runFis);
+
+// marc5us-massagen
+listen(mdb.ref('client_messages'), 'massagen', runMassagen);
+listen(mdb.ref('massage_clients'), 'massagen', runMassagen);
+listen(mdb.ref('client_uids'), 'massagen', runMassagen);
+listen(mdb.ref('push_requests'), 'massagen', runMassagen);
+// Terminerinnerungen brauchen eine zeitgesteuerte Prüfung, einmal pro Minute
+setInterval(() => schedule('massagen', runMassagen), 60 * 1000);
+
+console.log('marc5us Push-Dienst gestartet, wartet auf Änderungen.');
