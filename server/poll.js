@@ -38,6 +38,50 @@ async function send(uid, title, body) {
   } catch (e) { console.error('Push-Fehler', uid, e.message); }
 }
 
+// Outbox: Nachrichten aus dem Admin- und Kundenbereich (Text, Tests, Ankunft/ETA)
+async function deliver(uid, title, body) {
+  try {
+    const snap = await db.ref('pushTokens/' + uid).get();
+    const tokens = Object.keys(snap.val() || {});
+    if (!tokens.length) return 0;
+    const res = await fmsg.sendEachForMulticast({ tokens, notification: { title, body },
+      webpush: { notification: { icon: '/icons/icon-192.png', badge: '/icons/icon-192.png' }, fcmOptions: { link: '/' } } });
+    await Promise.all(res.responses.map((r, i) => (!r.success && DEAD.test(r.error?.code || ''))
+      ? db.ref(`pushTokens/${uid}/${tokens[i]}`).remove() : null));
+    return res.successCount;
+  } catch (e) { console.error('Push-Fehler', uid, e.message); return 0; }
+}
+
+async function processOutbox() {
+  const snap = await db.ref('outbox').limitToLast(200).get();
+  const items = snap.val() || {};
+  for (const [id, m] of Object.entries(items)) {
+    if (!m || m.sent) continue;
+    if (m.sendAt && m.sendAt > Date.now()) continue;           // geplant, noch nicht fällig
+    const fresh = (m.ts || 0) > Date.now() - 10 * 60e3;
+    if (!fresh && !m.sendAt) {                                 // alte Einträge nur abhaken
+      await db.ref('outbox/' + id).update({ sent: true, result: { sent: 0 } });
+      continue;
+    }
+    const claim = await db.ref('outbox/' + id + '/sent').transaction(c => c ? undefined : true);
+    if (!claim.committed) continue;
+
+    let title = m.title || 'marc5us', body = m.body || '';
+    if (m.type === 'eta') { title = '🚗 Komme gleich'; body = 'Marc ist unterwegs und kommt in Kürze.'; }
+    if (m.type === 'arrived') { title = '📍 Angekommen'; body = 'Marc ist angekommen.'; }
+
+    let targets = [];
+    if (m.audience === 'admin') targets = ADMIN_UIDS;
+    else if (m.audience === 'self' || m.audience === 'client') targets = m.code ? [m.code] : [];
+    else if (m.audience === 'all') targets = Object.keys((await db.ref('clients').get()).val() || {});
+
+    let count = 0;
+    for (const uid of targets) count += await deliver(uid, title, body);
+    await db.ref('outbox/' + id).update({ result: { sent: count }, error: null });
+    console.log('Outbox', id, 'an', targets.length, 'Empfänger, erreicht:', count);
+  }
+}
+
 const pick = t => ({ s: t.tripStatus || '', d: String(t.delayMinutes ?? 0) });
 
 async function runFis() {
@@ -258,6 +302,7 @@ function listen(ref, name, fn) {
 listen(db.ref('clients'), 'fis', runFis);
 listen(db.ref('requests'), 'fis', runFis);
 listen(db.ref('pushTests'), 'fis', runFis);
+listen(db.ref('outbox').limitToLast(200), 'outbox', processOutbox);
 
 // marc5us-massagen
 listen(mdb.ref('client_messages'), 'massagen', runMassagen);
@@ -268,5 +313,6 @@ listen(mdb.ref('push_requests'), 'massagen', runMassagen);
 // Sicherheitsnetz: Terminerinnerungen jede Minute, Fahrten alle 30 Sekunden
 setInterval(() => schedule('massagen', runMassagen), 60 * 1000);
 setInterval(() => schedule('fis', runFis), 30 * 1000);
+setInterval(() => schedule('outbox', processOutbox), 30 * 1000);
 
 console.log('marc5us Push-Dienst gestartet, wartet auf Änderungen.');
