@@ -117,6 +117,9 @@ async function runUser(ctx, uid, c) {
 }
 
 function start() {
+  try { startInner(); } catch (e) { console.error('schule: Start fehlgeschlagen, übersprungen:', e.message); }
+}
+function startInner() {
   if (!process.env.SERVICE_ACCOUNT_SCHULE) { console.log('schule: kein Secret SERVICE_ACCOUNT_SCHULE, übersprungen'); return; }
   const app = admin.initializeApp({ credential: admin.credential.cert(JSON.parse(process.env.SERVICE_ACCOUNT_SCHULE)),
     databaseURL: DBURL }, 'schule');
