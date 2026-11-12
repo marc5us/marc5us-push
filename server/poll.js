@@ -1,7 +1,8 @@
 // marc5us Push-Dienst
-// Bedient zwei Firebase-Projekte:
+// Bedient drei Firebase-Projekte:
 //   marc5us-75fcb    -> Secret SERVICE_ACCOUNT_JSON
 //   marc5us-massagen -> Secret SERVICE_ACCOUNT_MASSAGEN
+//   marc5us-schule   -> Secret SERVICE_ACCOUNT_SCHULE (eigenes Modul schule.js)
 const admin = require('firebase-admin');
 const crypto = require('crypto');
 
@@ -314,5 +315,8 @@ listen(mdb.ref('push_requests'), 'massagen', runMassagen);
 setInterval(() => schedule('massagen', runMassagen), 60 * 1000);
 setInterval(() => schedule('fis', runFis), 30 * 1000);
 setInterval(() => schedule('outbox', processOutbox), 30 * 1000);
+
+// marc5us-schule (eigenes Modul)
+require('./schule').start();
 
 console.log('marc5us Push-Dienst gestartet, wartet auf Änderungen.');
