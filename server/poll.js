@@ -317,6 +317,6 @@ setInterval(() => schedule('fis', runFis), 30 * 1000);
 setInterval(() => schedule('outbox', processOutbox), 30 * 1000);
 
 // marc5us-schule (eigenes Modul)
-require('./schule').start();
+try { require('./schule').start(); } catch (e) { console.error('schule konnte nicht starten:', e.message); }
 
 console.log('marc5us Push-Dienst gestartet, wartet auf Änderungen.');
