@@ -143,6 +143,20 @@ function startInner() {
     } catch (e) { console.error('schule tick', e.message); }
     finally { busy = false; }
   };
+  // Sofort reagieren, sobald sich ein Konto ändert (Test, neue Termine, Einstellungen)
+  const pending = {};
+  const kick = uid => {
+    clearTimeout(pending[uid]);
+    pending[uid] = setTimeout(async () => {
+      try {
+        const v = (await ctx.db.ref('users/' + uid).get()).val();
+        if (v && typeof v === 'object') await runUser(ctx, uid, v);
+      } catch (e) { console.error('schule', uid, e.message); }
+    }, 500);
+  };
+  ctx.db.ref('users').on('child_added', s => kick(s.key));
+  ctx.db.ref('users').on('child_changed', s => kick(s.key));
+  // Sicherheitsnetz für zeitgesteuerte Erinnerungen (Termine, Tagesübersicht)
   setInterval(tick, 60 * 1000);
   tick();
   console.log('schule: Push-Dienst gestartet');
