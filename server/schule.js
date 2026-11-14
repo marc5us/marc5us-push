@@ -101,7 +101,7 @@ async function runUser(ctx, uid, c) {
 
   // Motivation
   if (s.motiv && now.hm >= s.motivTime && await once(ctx.db, uid, `m_${now.date}_${s.motivTime}`))
-    await send('marc5us 💪', MOT[Number(now.date.replace(/-/g, '')) % MOT.length]);
+    await send('marc5us 💪', pick(MOT));
 
   // Tagesübersicht: Hausaufgaben und Mitnehmen
   if (s.on && now.hm >= s.time && await once(ctx.db, uid, `d_${now.date}_${s.time}`)) {
