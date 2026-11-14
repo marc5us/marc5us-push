@@ -100,11 +100,11 @@ async function runUser(ctx, uid, c) {
   }
 
   // Motivation
-  if (s.motiv && now.hm >= s.motivTime && await once(ctx.db, uid, `m_${now.date}`))
+  if (s.motiv && now.hm >= s.motivTime && await once(ctx.db, uid, `m_${now.date}_${s.motivTime}`))
     await send('marc5us 💪', MOT[Number(now.date.replace(/-/g, '')) % MOT.length]);
 
   // Tagesübersicht: Hausaufgaben und Mitnehmen
-  if (s.on && now.hm >= s.time && await once(ctx.db, uid, `d_${now.date}`)) {
+  if (s.on && now.hm >= s.time && await once(ctx.db, uid, `d_${now.date}_${s.time}`)) {
     const out = [], hw = [];
     for (const [, x] of L(subs)) for (const [, h] of L(x.homeworkHistory)) {
       if (h.done || !/^\d{4}-/.test(h.dueDate || '')) continue;
