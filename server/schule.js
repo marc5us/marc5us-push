@@ -56,17 +56,24 @@ async function once(db, uid, k) {
   return r.committed;
 }
 async function sendTo(ctx, uid, tokenMap, title, body) {
-  const entries = L(tokenMap).filter(([, v]) => v && v.token);
+  const seen = new Map();
+  for (const [k, v] of L(tokenMap)) if (v && v.token && !seen.has(v.token)) seen.set(v.token, k);
+  const entries = [...seen.entries()];
   if (!entries.length) return;
-  const res = await ctx.msg.sendEachForMulticast({ tokens: entries.map(([, v]) => v.token),
-    notification: { title, body }, webpush: { fcmOptions: { link: '/' } } });
+  const res = await ctx.msg.sendEachForMulticast({ tokens: entries.map(([t]) => t),
+    data: { title, body, tag: 'marc5us-schule' }, webpush: { headers: { Urgency: 'high' }, fcmOptions: { link: '/' } } });
   await Promise.all(res.responses.map((r, i) => (!r.success && DEAD.test(r.error?.code || ''))
-    ? ctx.db.ref(`users/${uid}/pushTokens/${entries[i][0]}`).remove() : null));
+    ? ctx.db.ref(`users/${uid}/pushTokens/${entries[i][1]}`).remove() : null));
   console.log('Schule-Push an', uid, '→', title, '| ok', res.successCount, 'Fehler', res.failureCount);
 }
 
 async function runUser(ctx, uid, c) {
   const tokenMap = c.pushTokens || {};
+  for (const [rid, r] of L(c.pushRequests)) {
+    await ctx.db.ref(`users/${uid}/pushRequests/${rid}`).remove();
+    if (!r || typeof r.ts !== 'number' || Date.now() - r.ts > 3600e3) continue;
+    await sendTo(ctx, uid, tokenMap, 'marc5us Schule 🔔', 'Test erfolgreich! So kommen deine Erinnerungen an.');
+  }
   if (!L(tokenMap).length) return;
   const s = { ...DEF, ...(c.pushSettings || {}) };
   const now = berlin();
