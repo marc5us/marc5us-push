@@ -157,7 +157,7 @@ function startInner() {
   ctx.db.ref('users').on('child_added', s => kick(s.key));
   ctx.db.ref('users').on('child_changed', s => kick(s.key));
   // Sicherheitsnetz für zeitgesteuerte Erinnerungen (Termine, Tagesübersicht)
-  setInterval(tick, 60 * 1000);
+  setInterval(tick, 15 * 1000);
   tick();
   console.log('schule: Push-Dienst gestartet');
 }
