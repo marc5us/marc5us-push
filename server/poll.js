@@ -174,6 +174,22 @@ async function claimOnce(key) {
 
 // Data-only-Nachricht, die der Service Worker (firebase-messaging-sw.js) anzeigt.
 // once = true: identischer Inhalt an denselben Empfänger wird nur einmal gesendet.
+// Ein Gerät kann unter mehreren Konten stehen (Abmelden hat nicht geklappt). Zugestellt wird
+// nur an das Konto, das den Token zuletzt registriert hat.
+async function tokenOwners() {
+  const snap = await mdb.ref('push_tokens').get();
+  const owners = {};
+  Object.entries(snap.val() || {}).forEach(([uid, tokens]) => {
+    Object.values(tokens || {}).forEach(v => {
+      if (!v || !v.token) return;
+      const t = String(v.updated || '');
+      const cur = owners[v.token];
+      if (!cur || t > cur.t) owners[v.token] = { uid, t };
+    });
+  });
+  return owners;
+}
+
 async function mSend(uid, title, body, url = '/', once = true) {
   try {
     if (once) {
@@ -181,7 +197,9 @@ async function mSend(uid, title, body, url = '/', once = true) {
       if (!(await claimOnce('c_' + key))) return;
     }
     const snap = await mdb.ref('push_tokens/' + uid).get();
-    const entries = Object.entries(snap.val() || {}).filter(([, v]) => v && v.token);
+    const owners = await tokenOwners();
+    const entries = Object.entries(snap.val() || {})
+      .filter(([, v]) => v && v.token && owners[v.token] && owners[v.token].uid === uid);
     if (!entries.length) return;
     const res = await mmsg.sendEachForMulticast({
       tokens: entries.map(([, v]) => v.token),
