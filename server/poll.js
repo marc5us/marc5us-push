@@ -17,6 +17,7 @@ const massagen = admin.initializeApp({
 }, 'massagen');
 
 const DEAD = /registration-token-not-registered|invalid-registration-token/;
+const sha1 = s => crypto.createHash('sha1').update(String(s)).digest('hex');
 
 // =====================================================================
 // PROJEKT marc5us-75fcb
@@ -176,7 +177,7 @@ async function claimOnce(key) {
 async function mSend(uid, title, body, url = '/', once = true) {
   try {
     if (once) {
-      const key = crypto.createHash('sha1').update(uid + '|' + title + '|' + body).digest('hex');
+      const key = sha1(uid + '|' + title + '|' + body);
       if (!(await claimOnce('c_' + key))) return;
     }
     const snap = await mdb.ref('push_tokens/' + uid).get();
@@ -194,16 +195,22 @@ async function mSend(uid, title, body, url = '/', once = true) {
 }
 
 async function runMassagen() {
-  const [clientsSnap, msgSnap, uidSnap, reqSnap, stateSnap] = await Promise.all([
+  const [clientsSnap, msgSnap, uidSnap, reqSnap, regSnap, fbSnap, accSnap, stateSnap] = await Promise.all([
     mdb.ref('massage_clients').get(), mdb.ref('client_messages').get(), mdb.ref('client_uids').get(),
-    mdb.ref('push_requests').get(), mdb.ref('pushState').get()]);
+    mdb.ref('push_requests').get(), mdb.ref('registration_requests').get(), mdb.ref('client_feedback').get(),
+    mdb.ref('account_changes').limitToLast(200).get(), mdb.ref('pushState').get()]);
+  const accChanges = accSnap.val() || {};
   const clients = clientsSnap.val() || {};
   const messages = msgSnap.val() || {};
+  const regs = regSnap.val() || {};
+  const feedback = fbSnap.val() || {};
   const uidsByClient = {};
   Object.entries(uidSnap.val() || {}).forEach(([uid, key]) => { (uidsByClient[key] = uidsByClient[key] || []).push(uid); });
   const old = stateSnap.val(), first = !old;
-  const state = { lastMsg: '', appts: {} };
+  const state = { lastMsg: '', appts: {}, accounts: {} };
   const jobs = [];
+  const toAdmins = (title, body) => M_ADMIN_UIDS.forEach(u => jobs.push(mSend(u, title, body, '/', false)));
+  const toClient = (key, title, body) => (uidsByClient[key] || []).forEach(u => jobs.push(mSend(u, title, body)));
 
   // 1) Neue Nachrichten: jede Nachricht genau einmal, Schlüssel = Datenbank-ID.
   //    Alte Nachrichten (älter als 15 Min.) und der erste Lauf werden nur markiert.
@@ -215,55 +222,153 @@ async function runMassagen() {
     if (!fresh) continue;
     const body = String(m.text || '').slice(0, 120);
     if (m.sender === 'admin' && m.clientKey) {
-      (uidsByClient[m.clientKey] || []).forEach(u => jobs.push(mSend(u, 'Neue Nachricht von Marc', body, '/', false)));
+      toClient(m.clientKey, 'Neue Nachricht von Marc', body);
     } else if (m.sender === 'client') {
-      M_ADMIN_UIDS.forEach(u => jobs.push(mSend(u, 'Neue Nachricht von ' + (m.clientName || m.username || 'Kunde'), body, '/', false)));
+      toAdmins('Neue Nachricht von ' + (m.clientName || m.username || 'Kunde'), body);
     }
   }
 
-  // 2) Termine: neu, bestätigt, storniert, geändert
+  // 1b) Neue Registrierungen (nur Admin)
+  for (const [id, r] of Object.entries(regs)) {
+    if (!r) continue;
+    const ts = new Date(r.timestamp).getTime();
+    if (!(await claimOnce('reg_' + id))) continue;
+    if (first || isNaN(ts) || ts < Date.now() - 15 * 60e3) continue;
+    toAdmins('Neue Registrierung', (r.clientName || r.username || 'Jemand') + ' möchte ein Konto.');
+  }
+
+  // 1c) Neues Feedback (nur Admin)
+  for (const [id, f] of Object.entries(feedback)) {
+    if (!f) continue;
+    const ts = new Date(f.timestamp).getTime();
+    if (!(await claimOnce('fbadm_' + id))) continue;
+    if (first || isNaN(ts) || ts < Date.now() - 15 * 60e3) continue;
+    toAdmins('Neues Feedback', (f.clientName || f.username || 'Kunde') + ': ' + (Number(f.rating) || 0) + ' ★');
+  }
+
+  // 1d) Passwort- und E-Mail-Änderungen aus Firebase Auth (vom Client gemeldet, nur Admin)
+  for (const [id, ch] of Object.entries(accChanges)) {
+    if (!ch) continue;
+    const ts = new Date(ch.timestamp).getTime();
+    if (!(await claimOnce('acc_' + id))) continue;
+    if (first || isNaN(ts) || ts < Date.now() - 15 * 60e3) continue;
+    toAdmins('Kontodaten geändert', (ch.clientName || 'Kunde') + ': ' + (ch.kind || 'Konto'));
+  }
+
+  // 2) Termine und Kontodaten
   const now = Date.now();
   for (const [key, c] of Object.entries(clients)) {
     const list = toList(c.appointments);
     const prevMap = (old && old.appts && old.appts[key]) || {};
+    const who = c.clientName || c.username || 'Kunde';
     state.appts[key] = {};
     list.forEach((a, i) => { if (a && a.depTime) state.appts[key][i] = { status: a.status || '', depTime: a.depTime, location: a.location || '' }; });
+
+    // Kontodaten (Anzeigename, Benutzername, E-Mail, Passwort als Hash)
+    const cur = { n: c.clientName || '', u: c.username || '', e: c.email || '', p: c.password ? sha1(c.password) : '' };
+    state.accounts[key] = cur;
+    const prevAcc = old && old.accounts && old.accounts[key];
+    if (!first && prevAcc) {
+      const changed = [];
+      if (prevAcc.n !== cur.n) changed.push('Anzeigename');
+      if (prevAcc.u !== cur.u) changed.push('Benutzername');
+      if (prevAcc.e !== cur.e) changed.push('E-Mail-Adresse');
+      if (prevAcc.p !== cur.p) changed.push('Passwort');
+      if (changed.length) toAdmins('Kontodaten geändert', who + ': ' + changed.join(', '));
+    }
+
     if (first) continue;
+
+    // Zuordnung alter zu neuen Terminen: zuerst über die Termin-Zeit, sonst über den Platz.
+    // So verschieben sich Zuordnungen nicht, wenn ein Termin gelöscht wird.
+    const prevByTime = {};
+    Object.values(prevMap).forEach(x => { if (x && x.depTime) prevByTime[x.depTime] = x; });
+    const curTimes = new Set(list.filter(x => x && x.depTime).map(x => x.depTime));
+    const used = new Set();
 
     list.forEach((a, i) => {
       if (!a || !a.depTime) return;
-      const b = prevMap[i];
+      let b = prevByTime[a.depTime];
+      if (!b && prevMap[i] && !curTimes.has(prevMap[i].depTime)) b = prevMap[i];
+      if (b) used.add(b.depTime);
       const where = a.location ? ' · ' + a.location : '';
-      let title = null, body = null;
+      // Wer hat die Änderung gemacht? Ab jetzt steht changedBy im Termin.
+      // Ältere Einträge ohne Feld: Admin-Stornos sind markiert, Anfragen (ausstand) kommen vom Kunden.
+      const by = a.changedBy || (a.cancelledBy === 'Admin' ? 'admin' : (a.status === 'ausstand' ? 'client' : 'admin'));
+      const fromAdmin = by === 'admin';
+      const timeChanged = !!b && a.depTime !== b.depTime;
+      const placeChanged = !!b && (a.location || '') !== (b.location || '');
+
       if (!b) {
-        if (a.status === 'aktiv') { title = 'Neuer Termin'; body = 'Am ' + fmtBerlin(a.depTime) + where; }
-      } else if (a.status !== b.status) {
-        if (a.status === 'storniert') { title = 'Termin storniert'; body = 'Der Termin am ' + fmtBerlin(b.depTime) + ' entfällt.'; }
-        else if (a.status === 'aktiv') { title = 'Termin bestätigt'; body = 'Am ' + fmtBerlin(a.depTime) + where; }
-      } else if (a.status !== 'storniert' && (a.depTime !== b.depTime || (a.location || '') !== (b.location || ''))) {
-        title = 'Termin geändert'; body = 'Neu: ' + fmtBerlin(a.depTime) + where;
+        // Neuer Eintrag: Anfrage vom Kunden oder direkt vom Admin angelegt
+        if (!fromAdmin) toAdmins('Neue Terminanfrage', who + ': ' + fmtBerlin(a.depTime) + where);
+        else if (a.status === 'aktiv') toClient(key, 'Neuer Termin', 'Am ' + fmtBerlin(a.depTime) + where);
+        return;
       }
-      if (title) (uidsByClient[key] || []).forEach(u => jobs.push(mSend(u, title, body)));
+
+      // Status-Übergänge
+      if (a.status !== b.status) {
+        if (a.status === 'storniert') {
+          if (fromAdmin) {
+            if (b.status === 'ausstand') toClient(key, 'Terminanfrage abgelehnt', 'Dein Termin am ' + fmtBerlin(b.depTime) + ' wurde abgelehnt.');
+            else toClient(key, 'Termin storniert', 'Der Termin am ' + fmtBerlin(b.depTime) + ' entfällt.');
+          } else {
+            toAdmins('Kunde hat storniert', who + ': Termin am ' + fmtBerlin(b.depTime));
+          }
+        } else if (a.status === 'aktiv' && b.status === 'ausstand') {
+          if (fromAdmin) toClient(key, 'Termin bestätigt', 'Am ' + fmtBerlin(a.depTime) + where);
+          else toAdmins('Kunde hat Termin geändert', who + ': ' + fmtBerlin(a.depTime) + where);
+        } else if (a.status === 'ausstand' && b.status === 'aktiv') {
+          if (fromAdmin) toClient(key, 'Termin geändert', 'Neu: ' + fmtBerlin(a.depTime) + where);
+          else toAdmins(timeChanged ? 'Kunde verschiebt Termin' : 'Kunde ändert Termin', who + ': ' + fmtBerlin(a.depTime) + where);
+        }
+        return;
+      }
+
+      // Gleicher Status, aber Zeit oder Ort geändert
+      if (timeChanged || placeChanged) {
+        if (fromAdmin) toClient(key, 'Termin geändert', 'Neu: ' + fmtBerlin(a.depTime) + where);
+        else toAdmins(timeChanged ? 'Kunde verschiebt Termin' : 'Kunde ändert Termin', who + ': ' + fmtBerlin(a.depTime) + where);
+      }
+    });
+
+    // Gelöschte Termine: alter Termin ist weg und wurde keinem neuen zugeordnet (nur Admin möglich)
+    Object.values(prevMap).forEach(x => {
+      if (!x || !x.depTime || used.has(x.depTime) || curTimes.has(x.depTime) || x.status === 'storniert') return;
+      toClient(key, 'Termin entfernt', 'Der Termin am ' + fmtBerlin(x.depTime) + ' wurde entfernt.');
     });
   }
 
-  // 3) Terminerinnerung ca. 24 h vorher, jeder Termin nur einmal
+  // 3) Erinnerungen: Kunde und Admin ca. 24 h vorher, jeder Termin nur einmal;
+  //    Feedback-Bitte kurz nach dem Ende eines Termins.
   for (const [key, c] of Object.entries(clients)) {
+    const who = c.clientName || c.username || 'Kunde';
     for (const a of toList(c.appointments)) {
       if (!a || a.status !== 'aktiv' || !a.depTime) continue;
       const pb = parseBerlin(a.depTime);
       if (!pb) continue;
+      const digits = a.depTime.replace(/\D/g, '');
       const diff = pb.getTime() - now;
-      if (diff > 25 * 3600e3 || diff < 23 * 3600e3) continue;
-      const flag = mdb.ref('reminders/' + key + '/' + a.depTime.replace(/\D/g, ''));
-      if ((await flag.get()).exists()) continue;
-      await flag.set(true);
-      (uidsByClient[key] || []).forEach(u => jobs.push(mSend(u, 'Terminerinnerung',
-        'Dein Termin: ' + fmtBerlin(a.depTime) + (a.location ? ' · ' + a.location : ''))));
+      const where = a.location ? ' · ' + a.location : '';
+
+      if (diff <= 25 * 3600e3 && diff >= 23 * 3600e3) {
+        if (await claimOnce('rem_' + key + '_' + digits)) {
+          toClient(key, 'Terminerinnerung', 'Dein Termin: ' + fmtBerlin(a.depTime) + where);
+          toAdmins('Termin in 24 Stunden', who + ': ' + fmtBerlin(a.depTime) + where);
+        }
+      }
+
+      const endMs = pb.getTime() + (a.duration || 60) * 60e3;
+      if (!first && now > endMs && now - endMs < 72 * 3600e3) {
+        const fbId = 'fb_' + key + '_' + digits;
+        if (feedback[fbId] === undefined && await claimOnce('fbask_' + key + '_' + digits)) {
+          toClient(key, 'Wie war deine Massage?', 'Gib uns kurz Feedback zu deinem Termin.');
+        }
+      }
     }
   }
 
-  // 4) Test-Pushes aus Kundenmenü und Adminbereich (immer senden)
+  // 4) Test-Pushes aus Kundenmenü und Adminbereich (immer senden, nur an den Auslöser)
   for (const [id, r] of Object.entries(reqSnap.val() || {})) {
     if (r && r.toUid) jobs.push(mSend(r.toUid, r.title || 'marc5us Massagen', r.body || 'Test erfolgreich.', '/', false));
     jobs.push(mdb.ref('push_requests/' + id).remove());
@@ -310,8 +415,11 @@ listen(mdb.ref('client_messages'), 'massagen', runMassagen);
 listen(mdb.ref('massage_clients'), 'massagen', runMassagen);
 listen(mdb.ref('client_uids'), 'massagen', runMassagen);
 listen(mdb.ref('push_requests'), 'massagen', runMassagen);
+listen(mdb.ref('registration_requests'), 'massagen', runMassagen);
+listen(mdb.ref('client_feedback'), 'massagen', runMassagen);
+listen(mdb.ref('account_changes').limitToLast(200), 'massagen', runMassagen);
 
-// Sicherheitsnetz: Terminerinnerungen jede Minute, Fahrten alle 30 Sekunden
+// Sicherheitsnetz: Erinnerungen und Feedback-Bitte jede Minute, Fahrten alle 30 Sekunden
 setInterval(() => schedule('massagen', runMassagen), 60 * 1000);
 setInterval(() => schedule('fis', runFis), 30 * 1000);
 setInterval(() => schedule('outbox', processOutbox), 30 * 1000);
