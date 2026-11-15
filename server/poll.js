@@ -213,11 +213,12 @@ async function mSend(uid, title, body, url = '/', once = true) {
 }
 
 async function runMassagen() {
-  const [clientsSnap, msgSnap, uidSnap, reqSnap, regSnap, fbSnap, accSnap, stateSnap] = await Promise.all([
+  const [clientsSnap, msgSnap, uidSnap, reqSnap, regSnap, fbSnap, accSnap, revSnap, stateSnap] = await Promise.all([
     mdb.ref('massage_clients').get(), mdb.ref('client_messages').get(), mdb.ref('client_uids').get(),
     mdb.ref('push_requests').get(), mdb.ref('registration_requests').get(), mdb.ref('client_feedback').get(),
-    mdb.ref('account_changes').limitToLast(200).get(), mdb.ref('pushState').get()]);
+    mdb.ref('account_changes').limitToLast(200).get(), mdb.ref('massage_reviews').get(), mdb.ref('pushState').get()]);
   const accChanges = accSnap.val() || {};
+  const reviews = revSnap.val() || {};
   const clients = clientsSnap.val() || {};
   const messages = msgSnap.val() || {};
   const regs = regSnap.val() || {};
@@ -262,6 +263,15 @@ async function runMassagen() {
     if (!(await claimOnce('fbadm_' + id))) continue;
     if (first || isNaN(ts) || ts < Date.now() - 15 * 60e3) continue;
     toAdmins('Neues Feedback', (f.clientName || f.username || 'Kunde') + ': ' + (Number(f.rating) || 0) + ' ★');
+  }
+
+  // 1c2) Neue Rezensionen (nur Admin)
+  for (const [id, r] of Object.entries(reviews)) {
+    if (!r) continue;
+    const ts = new Date(r.timestamp).getTime();
+    if (!(await claimOnce('rev_' + id))) continue;
+    if (first || isNaN(ts) || ts < Date.now() - 15 * 60e3) continue;
+    toAdmins('Neue Rezension', (r.clientName || r.username || 'Kunde') + ': ' + (Number(r.rating) || 0) + ' ★');
   }
 
   // 1d) Passwort- und E-Mail-Änderungen aus Firebase Auth (vom Client gemeldet, nur Admin)
@@ -436,6 +446,7 @@ listen(mdb.ref('push_requests'), 'massagen', runMassagen);
 listen(mdb.ref('registration_requests'), 'massagen', runMassagen);
 listen(mdb.ref('client_feedback'), 'massagen', runMassagen);
 listen(mdb.ref('account_changes').limitToLast(200), 'massagen', runMassagen);
+listen(mdb.ref('massage_reviews'), 'massagen', runMassagen);
 
 // Sicherheitsnetz: Erinnerungen und Feedback-Bitte jede Minute, Fahrten alle 30 Sekunden
 setInterval(() => schedule('massagen', runMassagen), 60 * 1000);
